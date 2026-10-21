@@ -94,6 +94,14 @@ Set the client timeout as high as it allows (≥ 660s) and disable streaming.
 
 - **Cloudflare blocks Python's default User-Agent (error 1010).** The poller
   sends a browser UA — keep it.
+- **Large payloads + fragile transports wedge queues.** Job claims carry a
+  60-second lease in the Worker: if the answer never arrives (dropped
+  transfer), the job is offered again automatically. The poller talks to
+  the Worker with curl (retries on) — urllib transfers through the VM's
+  egress proxy truncate mid-body on large jobs.
+- **`/v1/models` is answered at the edge** (<1s, key-checked, CORS-enabled),
+  never queued — GUI clients probe it with short timeouts and fail healthy
+  setups otherwise.
 - **Never probe `/internal/jobs` by hand while testing.** That endpoint
   *claims* jobs for whoever calls it; manual probes steal queued requests
   from the poller and make healthy setups look broken.

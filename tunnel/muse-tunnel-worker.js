@@ -17,7 +17,15 @@
  *     to the person running the poller.
  */
 const INTERNAL_SECRET = "__INTERNAL_SECRET__";
+const CLIENT_API_KEY = "__PROXY_API_KEY__"; // substituted at deploy time (scripts/deploy-worker.sh)
 const WAIT_MS = 600000; // 10 min, matches the relay's long-poll upstream
+const CLAIM_LEASE_MS = 60000; // a claimed job with no answer after 60s is offered again
+const CORS_HEADERS = {
+  "access-control-allow-origin": "*",
+  "access-control-allow-methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+  "access-control-allow-headers": "authorization, content-type",
+  "access-control-max-age": "86400",
+};
 
 function b64encode(u8) {
   let s = "";
@@ -46,9 +54,14 @@ export class Relay {
       if (url.searchParams.get("secret") !== INTERNAL_SECRET)
         return new Response("forbidden", { status: 403 });
       const out = [];
+      const now = Date.now();
       for (const [id, j] of this.jobs) {
-        if (!j.claimed) {
+        // Re-offer jobs whose claim lease expired (answer never arrived —
+        // e.g. the poll response was truncated in transit). Without this a
+        // single dropped transfer wedges the queue behind a lost job.
+        if (!j.claimed || (j.claimed_at && now - j.claimed_at > CLAIM_LEASE_MS)) {
           j.claimed = true;
+          j.claimed_at = now;
           out.push({ id, method: j.method, path: j.path, headers: j.headers, body: j.body });
         }
       }
@@ -83,7 +96,7 @@ export class Relay {
     const answerP = new Promise((resolve) => {
       this.jobs.set(id, {
         method: req.method, path: path + url.search, headers, body,
-        resolve, claimed: false,
+        resolve, claimed: false, claimed_at: 0,
       });
       timer = setTimeout(() => {
         if (this.jobs.has(id)) {
@@ -111,7 +124,34 @@ export class Relay {
 
 export default {
   async fetch(req, env) {
+    const url = new URL(req.url);
+
+    // CORS preflight — answered at the edge, never queued.
+    if (req.method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: CORS_HEADERS });
+    }
+
+    // /v1/models is static — answer at the edge in <1s instead of queueing
+    // it behind chat jobs (GUI clients probe it with short timeouts).
+    // Auth mirrors the local proxy: wrong/missing key -> instant 401.
+    if (req.method === "GET" && url.pathname === "/v1/models") {
+      if (req.headers.get("authorization") !== "Bearer " + CLIENT_API_KEY) {
+        return new Response(
+          '{"error":{"message":"invalid or missing API key","type":"auth_error"}}',
+          { status: 401, headers: { "content-type": "application/json", ...CORS_HEADERS } });
+      }
+      const body = JSON.stringify({
+        object: "list",
+        data: [{ id: "muse", object: "model", created: Math.floor(Date.now() / 1000), owned_by: "muse-relay" }],
+      });
+      return new Response(body, { headers: { "content-type": "application/json", ...CORS_HEADERS } });
+    }
+
     const stub = env.RELAY.get(env.RELAY.idFromName("muse"));
-    return stub.fetch(req);
+    const resp = await stub.fetch(req);
+    // Add CORS headers to queued responses too (browser/Electron clients).
+    const headers = new Headers(resp.headers);
+    for (const [k, v] of Object.entries(CORS_HEADERS)) headers.set(k, v);
+    return new Response(resp.body, { status: resp.status, headers });
   },
 };

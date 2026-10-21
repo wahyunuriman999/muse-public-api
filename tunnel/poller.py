@@ -15,6 +15,7 @@ Run: bash tunnel/start-poller.sh  (daemon, logs to poller.log)
 import base64
 import json
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -53,20 +54,30 @@ def log(msg):
     sys.stderr.write("poller: " + line)
 
 
+UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
+
+
 def wapi(method, path, payload=None):
+    # Transport is curl, not urllib: through this VM's egress proxy, urllib
+    # transfers — especially large job payloads — get truncated mid-body
+    # (IncompleteRead / RemoteDisconnected), while curl completes reliably.
+    # Cloudflare also blocks non-browser user agents (error 1010), hence -A.
     url = WORKER_URL + path
+    cmd = ["curl", "-s", "-m", "60", "--retry", "3", "--retry-all-errors",
+           "-A", UA, "-X", method, "-w", "\n%{http_code}"]
     data = None
-    # Cloudflare blocks the default Python-urllib UA (error 1010) — send a browser UA.
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"}
     if payload is not None:
         data = json.dumps(payload).encode()
-        headers["Content-Type"] = "application/json"
-    req = urllib.request.Request(url, data=data, method=method, headers=headers)
+        cmd += ["-H", "Content-Type: application/json", "--data-binary", "@-"]
+    p = subprocess.run(cmd + [url], input=data, capture_output=True, timeout=300)
+    out = p.stdout
+    nl = out.rfind(b"\n")
     try:
-        resp = urllib.request.urlopen(req, timeout=60)
-        return resp.status, resp.read()
-    except urllib.error.HTTPError as e:
-        return e.code, e.read()
+        status = int(out[nl + 1:].strip())
+        body = out[:nl]
+    except Exception:
+        status, body = 0, out
+    return status, body
 
 
 def answer_job(jid, status, headers, raw):

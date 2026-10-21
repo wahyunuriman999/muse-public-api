@@ -18,9 +18,11 @@ export CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID
 
 POLL_SECRET="$(grep '^POLL_SECRET=' tunnel/config.env | cut -d= -f2-)"
 [ -n "$POLL_SECRET" ] || { echo "POLL_SECRET missing — run scripts/setup.sh first"; exit 1; }
+PROXY_KEY="$(cat .secrets/proxy-key)"
+[ -n "$PROXY_KEY" ] || { echo ".secrets/proxy-key missing — run scripts/setup.sh first"; exit 1; }
 
 mkdir -p .build
-sed "s/__INTERNAL_SECRET__/$POLL_SECRET/" tunnel/muse-tunnel-worker.js > .build/worker.js
+sed -e "s/__INTERNAL_SECRET__/$POLL_SECRET/" -e "s/__PROXY_API_KEY__/$PROXY_KEY/" tunnel/muse-tunnel-worker.js > .build/worker.js
 cat > .build/wrangler.toml <<'EOF'
 name = "muse-tunnel"
 main = "worker.js"
