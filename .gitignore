@@ -1,0 +1,12 @@
+# secrets & generated config — never commit
+.secrets/
+tunnel/config.env
+.build/
+
+# runtime state
+relay/queue/
+relay/done/
+relay/stale/
+relay/bridge.pid
+*.log
+__pycache__/
